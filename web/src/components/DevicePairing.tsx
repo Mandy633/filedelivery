@@ -52,7 +52,7 @@ export function DevicePairing({
   }
 
   if (status === "connecting") return <p className="status-msg">Connecting to network…</p>;
-  if (status === "error") return <p className="error">Could not connect to pairing service.</p>;
+  if (status === "error") return <p className="error">Could not connect to pairing service — this may be a name conflict. Try reloading the page.</p>;
   if (status === "requesting") return <p className="status-msg">Waiting for the other device to accept…</p>;
 
   // status === "ready"

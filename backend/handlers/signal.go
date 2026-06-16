@@ -84,7 +84,14 @@ func (h *SignalHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	sc := &signalConn{conn: conn}
 
 	// Re-check capacity after upgrade to close the TOCTOU window.
+	// Re-fetch (or re-create) the room: if all prior clients disconnected during
+	// the upgrade, the deferred cleanup may have removed it from the map.
 	globalSignal.mu.Lock()
+	room = globalSignal.rooms[sessionID]
+	if room == nil {
+		room = &signalRoom{}
+		globalSignal.rooms[sessionID] = room
+	}
 	room.mu.Lock()
 	if len(room.clients) >= 2 {
 		room.mu.Unlock()

@@ -234,6 +234,9 @@
 .file-card .file-meta { font-size: 0.85rem; color: #6b7280; }
 .encryption-badge { font-size: 0.82rem; color: #16a34a; font-weight: 500; }
 
+.send-another-btn { margin-top: 12px; }
+.file-preview-pairing { margin-top: 8px; }
+
 /* ---- Device pairing ---- */
 .pairing-list ul { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .peer-item {

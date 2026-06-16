@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/mandy633/filedelivery/backend/handlers"
 	"github.com/mandy633/filedelivery/backend/session"
@@ -60,8 +64,24 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+
+	srv := &http.Server{Addr: ":" + port, Handler: corsMiddleware(mux)}
+
+	go func() {
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+		<-quit
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("Server listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 
 func corsMiddleware(next http.Handler) http.Handler {

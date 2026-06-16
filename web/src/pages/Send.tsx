@@ -48,6 +48,9 @@ export function Send() {
     const client = new PresenceClient(myName);
     presenceRef.current = client;
 
+    client.onDisconnected = () => setPairingStatus("connecting");
+    client.onReconnected = () => setPairingStatus("ready");
+
     client.onPeers = (list) => {
       setPeers(list);
       setPairingStatus((s) => (s === "connecting" ? "ready" : s));
@@ -200,7 +203,7 @@ export function Send() {
         ) : (
           <div className="transfer-status done">
             <p className="phase-label">File delivered ✓</p>
-            <button className="btn-primary" style={{ marginTop: 12 }} onClick={() => {
+            <button className="btn-primary send-another-btn" onClick={() => {
               setMode("pick");
               setFile(null);
               setQrUrl("");
@@ -228,7 +231,7 @@ export function Send() {
           onRejectPair={onRejectPair}
         />
         {file && (
-          <p className="file-preview" style={{ marginTop: 8 }}>
+          <p className="file-preview file-preview-pairing">
             📄 {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
           </p>
         )}

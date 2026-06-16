@@ -57,9 +57,10 @@ export class PresenceClient {
         this.ws = null;
         if (!this.shouldReconnect) return;
         if (!opened) {
-          // Initial connection or reconnect attempt failed before opening.
-          // Schedule another retry without calling onDisconnected.
-          this._scheduleReconnect();
+          // Connection closed before it opened (e.g. 409 name conflict or network error).
+          // On an initial connect attempt the promise is already rejected; don't schedule
+          // further retries or we'd loop forever. Only retry on subsequent reconnect calls.
+          if (!initial) this._scheduleReconnect();
           return;
         }
         this.onDisconnected?.();

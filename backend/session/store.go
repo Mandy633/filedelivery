@@ -10,6 +10,7 @@ import (
 
 const TTL = time.Hour
 const maxSessions = 500
+const maxSessionsPerIP = 10
 
 // MetaSnapshot holds immutable session fields plus a ready flag.
 type MetaSnapshot struct {
@@ -26,24 +27,38 @@ type session struct {
 	fileSize  int64
 	data      []byte
 	createdAt time.Time
+	ip        string
 }
 
 type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]*session
+	perIP    map[string]int
+	ttl      time.Duration
 }
 
 func NewStore() *Store {
-	s := &Store{sessions: make(map[string]*session)}
+	return NewStoreWithTTL(TTL)
+}
+
+func NewStoreWithTTL(ttl time.Duration) *Store {
+	s := &Store{
+		sessions: make(map[string]*session),
+		perIP:    make(map[string]int),
+		ttl:      ttl,
+	}
 	go s.cleanupLoop()
 	return s
 }
 
-func (s *Store) Create(fileName, mimeType string, fileSize int64) (string, error) {
+func (s *Store) Create(ip, fileName, mimeType string, fileSize int64) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.sessions) >= maxSessions {
 		return "", errors.New("server at capacity, try again later")
+	}
+	if s.perIP[ip] >= maxSessionsPerIP {
+		return "", errors.New("too many active sessions from your IP")
 	}
 	// Retry on the rare collision (32-bit ID space).
 	var id string
@@ -59,7 +74,9 @@ func (s *Store) Create(fileName, mimeType string, fileSize int64) (string, error
 		mimeType:  mimeType,
 		fileSize:  fileSize,
 		createdAt: time.Now(),
+		ip:        ip,
 	}
+	s.perIP[ip]++
 	return id, nil
 }
 
@@ -109,6 +126,7 @@ func (s *Store) TakeData(id string) ([]byte, bool) {
 		return nil, false
 	}
 	data := sess.data
+	s.decrementIP(sess.ip)
 	delete(s.sessions, id)
 	return data, true
 }
@@ -117,16 +135,30 @@ func (s *Store) TakeData(id string) ([]byte, bool) {
 func (s *Store) Delete(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, id)
+	if sess, ok := s.sessions[id]; ok {
+		s.decrementIP(sess.ip)
+		delete(s.sessions, id)
+	}
+}
+
+// decrementIP decrements the per-IP counter and removes the key when it hits zero.
+// Must be called with s.mu held.
+func (s *Store) decrementIP(ip string) {
+	s.perIP[ip]--
+	if s.perIP[ip] <= 0 {
+		delete(s.perIP, ip)
+	}
 }
 
 func (s *Store) cleanupLoop() {
-	ticker := time.NewTicker(time.Minute)
+	interval := min(s.ttl, time.Minute)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
 		s.mu.Lock()
 		for id, sess := range s.sessions {
-			if time.Since(sess.createdAt) > TTL {
+			if time.Since(sess.createdAt) > s.ttl {
+				s.decrementIP(sess.ip)
 				delete(s.sessions, id)
 			}
 		}

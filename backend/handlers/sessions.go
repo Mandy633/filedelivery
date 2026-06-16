@@ -48,7 +48,8 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file too large (max 100 MB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	id, err := h.Store.Create(req.FileName, req.MIMEType, req.FileSize)
+	ip := clientIP(r)
+	id, err := h.Store.Create(ip, req.FileName, req.MIMEType, req.FileSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -132,9 +133,12 @@ func (h *SessionHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// RFC 5987 preserves the original Unicode filename in all modern browsers.
+	// url.PathEscape does not encode single quotes (a delimiter in RFC 5987 ext-value),
+	// so escape them explicitly.
+	encoded := strings.ReplaceAll(url.PathEscape(meta.FileName), "'", "%27")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(meta.FileName)))
+		fmt.Sprintf(`attachment; filename*=UTF-8''%s`, encoded))
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Write(data)
 }
