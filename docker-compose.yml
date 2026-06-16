@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # No host port published — only the web container reaches the backend
+    # via the internal Docker network. Exposing 8080 directly bypasses nginx
+    # and its security headers.
+    environment:
+      PORT: "8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ""
+        VITE_WS_BASE: ""
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
