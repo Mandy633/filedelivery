@@ -1,4 +1,6 @@
-const WS_BASE = import.meta.env.VITE_WS_BASE ?? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
+const WS_BASE =
+  import.meta.env.VITE_WS_BASE ??
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
 
 export type PresenceMsg =
   | { type: "peers"; peers: string[] }
@@ -9,24 +11,68 @@ export type PresenceMsg =
 export class PresenceClient {
   private ws: WebSocket | null = null;
   private readonly name: string;
+  private shouldReconnect = false;
+  private reconnectDelay = 1000;
 
   onPeers?: (peers: string[]) => void;
   onPairRequest?: (from: string) => void;
   onPairResponse?: (from: string, accepted: boolean) => void;
   onTransferReceived?: (url: string, fileName: string) => void;
+  onDisconnected?: () => void;
+  onReconnected?: () => void;
 
   constructor(name: string) {
     this.name = name;
   }
 
   connect(): Promise<void> {
+    this.shouldReconnect = true;
+    this.reconnectDelay = 1000;
+    return this._open(true);
+  }
+
+  /**
+   * Opens a WebSocket connection.
+   * `initial` — when true, a connection failure rejects the returned Promise.
+   * On reconnect attempts the failure is swallowed (onclose schedules the next retry).
+   */
+  private _open(initial = false): Promise<void> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`${WS_BASE}/ws/presence?name=${encodeURIComponent(this.name)}`);
+      const url = `${WS_BASE}/ws/presence?name=${encodeURIComponent(this.name)}`;
+      const ws = new WebSocket(url);
       this.ws = ws;
-      ws.onopen = () => resolve();
-      ws.onerror = () => reject(new Error("presence connection failed"));
+      let opened = false;
+
+      ws.onopen = () => {
+        opened = true;
+        this.reconnectDelay = 1000;
+        resolve();
+      };
+
+      ws.onerror = () => {
+        if (initial && !opened) reject(new Error("presence connection failed"));
+      };
+
+      ws.onclose = () => {
+        this.ws = null;
+        if (!this.shouldReconnect) return;
+        if (!opened) {
+          // Initial connection or reconnect attempt failed before opening.
+          // Schedule another retry without calling onDisconnected.
+          this._scheduleReconnect();
+          return;
+        }
+        this.onDisconnected?.();
+        this._scheduleReconnect();
+      };
+
       ws.onmessage = (e) => {
-        const msg: PresenceMsg = JSON.parse(e.data);
+        let msg: PresenceMsg;
+        try {
+          msg = JSON.parse(e.data as string);
+        } catch {
+          return;
+        }
         switch (msg.type) {
           case "peers":
             this.onPeers?.(msg.peers.filter((p) => p !== this.name));
@@ -45,6 +91,16 @@ export class PresenceClient {
     });
   }
 
+  private _scheduleReconnect(): void {
+    if (!this.shouldReconnect) return;
+    const delay = this.reconnectDelay;
+    this.reconnectDelay = Math.min(delay * 2, 30_000);
+    setTimeout(() => {
+      if (!this.shouldReconnect) return;
+      this._open().then(() => this.onReconnected?.()).catch(() => {});
+    }, delay);
+  }
+
   requestPair(targetName: string): void {
     this.ws?.send(JSON.stringify({ type: "pair-request", target: targetName }));
   }
@@ -58,6 +114,7 @@ export class PresenceClient {
   }
 
   disconnect(): void {
+    this.shouldReconnect = false;
     this.ws?.close();
     this.ws = null;
   }

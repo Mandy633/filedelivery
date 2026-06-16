@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { importKey, decrypt } from "../lib/crypto";
-import { fetchMeta, downloadEncrypted, triggerDownload, type SessionMeta } from "../lib/transfer";
+import { fetchMeta, downloadEncrypted, triggerDownload, HttpError, type SessionMeta } from "../lib/transfer";
 import { TransferStatus } from "../components/TransferStatus";
 
 type Phase =
   | "loading"
+  | "preparing"   // session found but upload not yet complete
   | "preview"
   | "downloading"
   | "decrypting"
@@ -25,7 +26,10 @@ export function Receive() {
   const [meta, setMeta] = useState<SessionMeta | null>(null);
   const [progress, setProgress] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
+  const readyPollAbortRef = useRef<AbortController | null>(null);
 
+  // Read the key once from the URL fragment. The fragment is never sent to the
+  // server, so it only exists in the browser.
   const keyStr = location.hash.replace("#key=", "").trim();
 
   useEffect(() => {
@@ -33,9 +37,49 @@ export function Receive() {
     if (!keyStr) { setPhase("no-key"); return; }
 
     fetchMeta(sessionId)
-      .then((m) => { setMeta(m); setPhase("preview"); })
-      .catch(() => { setPhase("error"); setErrorMsg("Session not found or already expired."); });
-  }, [sessionId, keyStr]);
+      .then((m) => {
+        setMeta(m);
+        if (!m.ready) {
+          setPhase("preparing");
+          pollUntilReady(sessionId);
+        } else {
+          setPhase("preview");
+        }
+      })
+      .catch(() => {
+        setPhase("error");
+        setErrorMsg("Session not found or already expired.");
+      });
+
+    return () => readyPollAbortRef.current?.abort();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  async function pollUntilReady(sid: string) {
+    const abort = new AbortController();
+    readyPollAbortRef.current = abort;
+
+    while (!abort.signal.aborted) {
+      await new Promise((r) => setTimeout(r, 1500));
+      if (abort.signal.aborted) return;
+      try {
+        const m = await fetchMeta(sid);
+        setMeta(m);
+        if (m.ready) {
+          setPhase("preview");
+          return;
+        }
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 404) {
+          setPhase("error");
+          setErrorMsg("Session expired while waiting for upload.");
+        } else {
+          // Transient network error — keep polling.
+        }
+        return;
+      }
+    }
+  }
 
   async function startDownload() {
     if (!sessionId || !keyStr || !meta) return;
@@ -60,7 +104,10 @@ export function Receive() {
   if (phase === "no-key") {
     return (
       <div className="page">
-        <p className="error">This link is missing the decryption key. Make sure you opened the full link including everything after the #.</p>
+        <p className="error">
+          This link is missing the decryption key. Make sure you opened the
+          full link including everything after the <code>#</code>.
+        </p>
       </div>
     );
   }
@@ -74,6 +121,18 @@ export function Receive() {
     );
   }
 
+  if (phase === "preparing") {
+    return (
+      <div className="page">
+        <h2>File incoming…</h2>
+        <div className="file-card">
+          {meta && <p className="file-name">{meta.fileName}</p>}
+          <p className="status-msg">Waiting for sender to finish uploading…</p>
+        </div>
+      </div>
+    );
+  }
+
   if (phase === "preview" && meta) {
     return (
       <div className="page">
@@ -83,7 +142,9 @@ export function Receive() {
           <p className="file-meta">{meta.mimeType} · {formatBytes(meta.fileSize)}</p>
           <p className="encryption-badge">🔒 End-to-end encrypted</p>
         </div>
-        <button className="btn-primary" onClick={startDownload}>Download</button>
+        <button className="btn-primary" onClick={startDownload}>
+          Download
+        </button>
       </div>
     );
   }

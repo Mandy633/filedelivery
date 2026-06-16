@@ -15,7 +15,10 @@ function pick<T>(arr: T[]): T {
 }
 
 export function generateDeviceName(): string {
-  return `${pick(adjectives)}-${pick(nouns)}`;
+  // 20 × 20 adjective-noun pairs = 400 combinations, which is too small for
+  // reliable uniqueness. A 4-hex suffix expands the space to 400 × 65 536 = ~26 M.
+  const suffix = Math.floor(Math.random() * 0x10000).toString(16).padStart(4, "0");
+  return `${pick(adjectives)}-${pick(nouns)}-${suffix}`;
 }
 
 const STORAGE_KEY = "fd-device-name";

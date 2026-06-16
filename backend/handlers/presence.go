@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -12,7 +13,13 @@ import (
 )
 
 var presenceUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		allowed := os.Getenv("CORS_ORIGIN")
+		if allowed == "" || allowed == "*" {
+			return true
+		}
+		return r.Header.Get("Origin") == allowed
+	},
 }
 
 type peer struct {
@@ -25,7 +32,9 @@ type peer struct {
 func (p *peer) writeJSON(v any) {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
-	p.conn.WriteJSON(v) //nolint:errcheck — best-effort push
+	if err := p.conn.WriteJSON(v); err != nil {
+		log.Printf("presence: write to %s: %v", p.name, err)
+	}
 }
 
 type presenceHub struct {
@@ -53,7 +62,7 @@ func PresenceHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject duplicate names before upgrading.
+	// Reject duplicate names before upgrading (pre-check under read lock).
 	globalHub.mu.RLock()
 	_, taken := globalHub.peers[name]
 	globalHub.mu.RUnlock()
@@ -84,7 +93,6 @@ func PresenceHandler(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		globalHub.mu.Lock()
-		// Only remove if this goroutine still owns the name.
 		if globalHub.peers[name] == p {
 			delete(globalHub.peers, name)
 		}
@@ -107,19 +115,17 @@ func PresenceHandler(w http.ResponseWriter, r *http.Request) {
 			globalHub.mu.RLock()
 			target, ok := globalHub.peers[msg.Target]
 			globalHub.mu.RUnlock()
-			if !ok {
-				continue
+			if ok {
+				target.writeJSON(presenceMsg{Type: "pair-request", From: name})
 			}
-			target.writeJSON(presenceMsg{Type: "pair-request", From: name})
 
 		case "pair-response":
 			globalHub.mu.RLock()
 			initiator, ok := globalHub.peers[msg.Target]
 			globalHub.mu.RUnlock()
-			if !ok {
-				continue
+			if ok {
+				initiator.writeJSON(presenceMsg{Type: "pair-response", From: name, Accepted: msg.Accepted})
 			}
-			initiator.writeJSON(presenceMsg{Type: "pair-response", From: name, Accepted: msg.Accepted})
 
 		case "transfer-invite":
 			// Relay the receive URL to the target device.
@@ -128,17 +134,17 @@ func PresenceHandler(w http.ResponseWriter, r *http.Request) {
 			globalHub.mu.RLock()
 			target, ok := globalHub.peers[msg.Target]
 			globalHub.mu.RUnlock()
-			if !ok {
-				continue
+			if ok {
+				target.writeJSON(presenceMsg{Type: "transfer-invite", From: name, URL: msg.URL, FileName: msg.FileName})
 			}
-			target.writeJSON(presenceMsg{Type: "transfer-invite", From: name, URL: msg.URL, FileName: msg.FileName})
 		}
 	}
 }
 
 func broadcastPeerList(ip string) {
+	// Collect targets under the read lock; write outside it to avoid holding
+	// the lock while doing potentially slow WebSocket writes.
 	globalHub.mu.RLock()
-	// Collect names first so we don't hold the lock while writing.
 	var targets []*peer
 	var names []string
 	for _, p := range globalHub.peers {
@@ -159,8 +165,7 @@ func broadcastPeerList(ip string) {
 // when the request comes from the address in the TRUSTED_PROXY env var.
 func clientIP(r *http.Request) string {
 	remoteIP, _, _ := net.SplitHostPort(r.RemoteAddr)
-	trustedProxy := os.Getenv("TRUSTED_PROXY")
-	if trustedProxy != "" && remoteIP == trustedProxy {
+	if trustedProxy := os.Getenv("TRUSTED_PROXY"); trustedProxy != "" && remoteIP == trustedProxy {
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 			return strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
 		}

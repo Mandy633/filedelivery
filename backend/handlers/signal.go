@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
+	"os"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -9,7 +11,13 @@ import (
 )
 
 var signalUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		allowed := os.Getenv("CORS_ORIGIN")
+		if allowed == "" || allowed == "*" {
+			return true
+		}
+		return r.Header.Get("Origin") == allowed
+	},
 }
 
 type signalConn struct {
@@ -20,7 +28,9 @@ type signalConn struct {
 func (sc *signalConn) write(msgType int, data []byte) {
 	sc.writeMu.Lock()
 	defer sc.writeMu.Unlock()
-	sc.conn.WriteMessage(msgType, data) //nolint:errcheck
+	if err := sc.conn.WriteMessage(msgType, data); err != nil {
+		log.Printf("signal: write error: %v", err)
+	}
 }
 
 type signalRoom struct {
@@ -45,13 +55,12 @@ func (h *SignalHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session required", http.StatusBadRequest)
 		return
 	}
-	// Only allow signaling for sessions that exist in the store.
 	if !h.Store.Exists(sessionID) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 
-	// Check room capacity before upgrading to WebSocket.
+	// Pre-check room capacity before upgrading to avoid wasting the handshake.
 	globalSignal.mu.Lock()
 	room, exists := globalSignal.rooms[sessionID]
 	if !exists {
@@ -74,8 +83,15 @@ func (h *SignalHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	sc := &signalConn{conn: conn}
 
+	// Re-check capacity after upgrade to close the TOCTOU window.
 	globalSignal.mu.Lock()
 	room.mu.Lock()
+	if len(room.clients) >= 2 {
+		room.mu.Unlock()
+		globalSignal.mu.Unlock()
+		conn.Close()
+		return
+	}
 	room.clients = append(room.clients, sc)
 	room.mu.Unlock()
 	globalSignal.mu.Unlock()

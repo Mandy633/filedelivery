@@ -8,6 +8,16 @@ export interface SessionMeta {
   ready: boolean;
 }
 
+/** Carries an HTTP status code so callers can distinguish 404 from 5xx/network errors. */
+export class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+    this.name = "HttpError";
+  }
+}
+
 export async function createSession(
   fileName: string,
   mimeType: string,
@@ -18,7 +28,7 @@ export async function createSession(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ fileName, mimeType, fileSize }),
   });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new HttpError(res.status, await res.text());
   const { sessionId } = await res.json();
   return sessionId;
 }
@@ -36,7 +46,7 @@ export async function uploadEncrypted(
         if (e.lengthComputable) onProgress((e.loaded / e.total) * 100);
       });
     }
-    xhr.onload = () => (xhr.status === 204 ? resolve() : reject(new Error(xhr.responseText)));
+    xhr.onload = () => (xhr.status === 204 ? resolve() : reject(new HttpError(xhr.status, xhr.responseText)));
     xhr.onerror = () => reject(new Error("upload failed"));
     xhr.send(data);
   });
@@ -44,7 +54,7 @@ export async function uploadEncrypted(
 
 export async function fetchMeta(sessionId: string): Promise<SessionMeta> {
   const res = await fetch(`${API_BASE}/api/sessions/${sessionId}/meta`);
-  if (!res.ok) throw new Error("session not found");
+  if (!res.ok) throw new HttpError(res.status, `HTTP ${res.status}`);
   const data = await res.json();
   return { sessionId, ...data };
 }
@@ -63,7 +73,9 @@ export async function downloadEncrypted(
       });
     }
     xhr.onload = () =>
-      xhr.status === 200 ? resolve(xhr.response) : reject(new Error("download failed"));
+      xhr.status === 200
+        ? resolve(xhr.response)
+        : reject(new HttpError(xhr.status, "download failed"));
     xhr.onerror = () => reject(new Error("download failed"));
     xhr.send();
   });
@@ -76,14 +88,15 @@ export function triggerDownload(data: ArrayBuffer, fileName: string, mimeType: s
   a.href = url;
   a.download = fileName;
   a.click();
-  // Delay revocation so the browser has time to initiate the download.
+  // Delay revocation so the browser has time to initiate the download before
+  // the object URL becomes invalid (important on mobile browsers).
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /**
- * Polls the session meta endpoint every `intervalMs` milliseconds until
- * the session disappears (receiver downloaded and server deleted it).
- * Resolves when the session is gone; `signal` can abort early.
+ * Polls the meta endpoint every `intervalMs` ms until the session disappears
+ * (server deletes it after the receiver downloads the file).
+ * Only a 404 response is treated as "done" — network errors and 5xx keep polling.
  */
 export async function pollUntilGone(
   sessionId: string,
@@ -96,9 +109,10 @@ export async function pollUntilGone(
     try {
       await fetchMeta(sessionId);
       // Session still alive — keep polling.
-    } catch {
-      // fetchMeta throws on 404 → session deleted after download.
-      return;
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) return;
+      // Transient error (network blip, 5xx) — keep polling rather than falsely
+      // declaring delivery complete.
     }
   }
 }

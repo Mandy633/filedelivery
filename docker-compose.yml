@@ -3,8 +3,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8080:8080"
+    # No host port published — only the web container reaches the backend
+    # via the internal Docker network. Exposing 8080 directly bypasses nginx
+    # and its security headers.
     environment:
       PORT: "8080"
 

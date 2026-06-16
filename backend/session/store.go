@@ -45,15 +45,22 @@ func (s *Store) Create(fileName, mimeType string, fileSize int64) (string, error
 	if len(s.sessions) >= maxSessions {
 		return "", errors.New("server at capacity, try again later")
 	}
-	sess := &session{
-		id:        uuid.New().String()[:8],
+	// Retry on the rare collision (32-bit ID space).
+	var id string
+	for {
+		id = uuid.New().String()[:8]
+		if _, exists := s.sessions[id]; !exists {
+			break
+		}
+	}
+	s.sessions[id] = &session{
+		id:        id,
 		fileName:  fileName,
 		mimeType:  mimeType,
 		fileSize:  fileSize,
 		createdAt: time.Now(),
 	}
-	s.sessions[sess.id] = sess
-	return sess.id, nil
+	return id, nil
 }
 
 // GetMeta returns immutable metadata and whether the blob is ready.

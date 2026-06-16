@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -31,6 +33,8 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Bound the JSON body to prevent memory exhaustion.
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req createRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -108,18 +112,29 @@ func (h *SessionHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := sessionIDFromPath(r.URL.Path)
-	data, ok := h.Store.TakeData(id)
-	if !ok {
-		if h.Store.Exists(id) {
-			// Session exists but upload is not done yet.
-			http.Error(w, "not ready", http.StatusAccepted)
-		} else {
-			http.NotFound(w, r)
-		}
+
+	// Capture metadata before atomically removing the blob so the filename
+	// is available for the Content-Disposition header after deletion.
+	meta, exists := h.Store.GetMeta(id)
+	if !exists {
+		http.NotFound(w, r)
 		return
 	}
+	if !meta.Ready {
+		http.Error(w, "not ready", http.StatusAccepted)
+		return
+	}
+
+	data, ok := h.Store.TakeData(id)
+	if !ok {
+		// Lost a race with a concurrent download — session already gone.
+		http.NotFound(w, r)
+		return
+	}
+	// RFC 5987 preserves the original Unicode filename in all modern browsers.
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment")
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf(`attachment; filename*=UTF-8''%s`, url.PathEscape(meta.FileName)))
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Write(data)
 }
