@@ -7,10 +7,11 @@ export async function generateKey(): Promise<CryptoKey> {
 
 export async function exportKey(key: CryptoKey): Promise<string> {
   const raw = await crypto.subtle.exportKey("raw", key);
-  return btoa(String.fromCharCode(...new Uint8Array(raw)))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  // Avoid spread-into-function-call which can blow the call stack on large arrays.
+  const bytes = new Uint8Array(raw);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 export async function importKey(b64url: string): Promise<CryptoKey> {
@@ -21,10 +22,10 @@ export async function importKey(b64url: string): Promise<CryptoKey> {
 
 export async function encrypt(key: CryptoKey, data: ArrayBuffer): Promise<ArrayBuffer> {
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data));
   const result = new Uint8Array(IV_LENGTH + ciphertext.byteLength);
   result.set(iv, 0);
-  result.set(new Uint8Array(ciphertext), IV_LENGTH);
+  result.set(ciphertext, IV_LENGTH);
   return result.buffer;
 }
 

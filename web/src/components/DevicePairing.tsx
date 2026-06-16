@@ -1,68 +1,52 @@
-import { useEffect, useState } from "react";
-import { PresenceClient } from "../lib/presence";
+export type PairingStatus =
+  | "connecting"
+  | "ready"
+  | "requesting"
+  | "waiting-for-file"
+  | "error";
 
 interface Props {
-  onPaired: (sessionId: string) => void;
   myName: string;
+  peers: string[];
+  status: PairingStatus;
+  incomingFrom: string | null;
+  onRequestPair: (target: string) => void;
+  onAcceptPair: () => void;
+  onRejectPair: () => void;
 }
 
-export function DevicePairing({ onPaired, myName }: Props) {
-  const [peers, setPeers] = useState<string[]>([]);
-  const [status, setStatus] = useState<"connecting" | "ready" | "requesting" | "error">("connecting");
-  const [incomingFrom, setIncomingFrom] = useState<string | null>(null);
-  const clientRef = { current: null as PresenceClient | null };
-
-  useEffect(() => {
-    const client = new PresenceClient(myName);
-    clientRef.current = client;
-
-    client.onPeers = (list) => {
-      setPeers(list);
-      setStatus("ready");
-    };
-
-    client.onPairRequest = (from) => {
-      setIncomingFrom(from);
-    };
-
-    client.onPairResponse = (from, accepted) => {
-      if (accepted) {
-        onPaired(`pair-${myName}-${from}`);
-      } else {
-        setStatus("ready");
-      }
-    };
-
-    client.connect().catch(() => setStatus("error"));
-
-    return () => client.disconnect();
-  }, [myName]);
-
-  function requestPair(targetName: string) {
-    setStatus("requesting");
-    clientRef.current?.requestPair(targetName);
-  }
-
-  function acceptPair() {
-    if (!incomingFrom) return;
-    clientRef.current?.respondPair(incomingFrom, true);
-    onPaired(`pair-${incomingFrom}-${myName}`);
-  }
-
-  function rejectPair() {
-    if (!incomingFrom) return;
-    clientRef.current?.respondPair(incomingFrom, false);
-    setIncomingFrom(null);
-  }
-
+export function DevicePairing({
+  myName,
+  peers,
+  status,
+  incomingFrom,
+  onRequestPair,
+  onAcceptPair,
+  onRejectPair,
+}: Props) {
   if (incomingFrom) {
     return (
       <div className="pairing-incoming">
-        <p><strong>{incomingFrom}</strong> wants to send you a file.</p>
+        <p>
+          <strong>{incomingFrom}</strong> wants to send you a file.
+        </p>
         <div className="pair-actions">
-          <button className="btn-primary" onClick={acceptPair}>Accept</button>
-          <button className="btn-secondary" onClick={rejectPair}>Decline</button>
+          <button className="btn-primary" onClick={onAcceptPair}>
+            Accept
+          </button>
+          <button className="btn-secondary" onClick={onRejectPair}>
+            Decline
+          </button>
         </div>
+      </div>
+    );
+  }
+
+  if (status === "waiting-for-file") {
+    return (
+      <div className="pairing-empty">
+        <p>Your device name: <strong>{myName}</strong></p>
+        <p className="status-msg">Waiting for sender to finish uploading…</p>
       </div>
     );
   }
@@ -71,23 +55,33 @@ export function DevicePairing({ onPaired, myName }: Props) {
   if (status === "error") return <p className="error">Could not connect to pairing service.</p>;
   if (status === "requesting") return <p className="status-msg">Waiting for the other device to accept…</p>;
 
+  // status === "ready"
   if (peers.length === 0) {
     return (
       <div className="pairing-empty">
-        <p>Your device name: <strong>{myName}</strong></p>
-        <p className="hint">No other devices found on this network yet. Both devices must have the app open.</p>
+        <p>
+          Your device name: <strong>{myName}</strong>
+        </p>
+        <p className="hint">
+          No nearby devices found. Open this app on another device on the same
+          Wi-Fi and navigate to <em>Send → Nearby Devices</em>.
+        </p>
       </div>
     );
   }
 
   return (
     <div className="pairing-list">
-      <p>Your device name: <strong>{myName}</strong></p>
+      <p>
+        Your device name: <strong>{myName}</strong>
+      </p>
       <p className="hint">Nearby devices:</p>
       <ul>
         {peers.map((name) => (
           <li key={name}>
-            <button className="peer-item" onClick={() => requestPair(name)}>{name}</button>
+            <button className="peer-item" onClick={() => onRequestPair(name)}>
+              {name}
+            </button>
           </li>
         ))}
       </ul>

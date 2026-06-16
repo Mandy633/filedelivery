@@ -76,13 +76,29 @@ export function triggerDownload(data: ArrayBuffer, fileName: string, mimeType: s
   a.href = url;
   a.download = fileName;
   a.click();
-  URL.revokeObjectURL(url);
+  // Delay revocation so the browser has time to initiate the download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export async function pollUntilReady(sessionId: string, intervalMs = 1500): Promise<SessionMeta> {
-  while (true) {
-    const meta = await fetchMeta(sessionId);
-    if (meta.ready) return meta;
+/**
+ * Polls the session meta endpoint every `intervalMs` milliseconds until
+ * the session disappears (receiver downloaded and server deleted it).
+ * Resolves when the session is gone; `signal` can abort early.
+ */
+export async function pollUntilGone(
+  sessionId: string,
+  intervalMs = 2000,
+  signal?: AbortSignal
+): Promise<void> {
+  while (!signal?.aborted) {
     await new Promise((r) => setTimeout(r, intervalMs));
+    if (signal?.aborted) break;
+    try {
+      await fetchMeta(sessionId);
+      // Session still alive — keep polling.
+    } catch {
+      // fetchMeta throws on 404 → session deleted after download.
+      return;
+    }
   }
 }

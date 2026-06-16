@@ -1,30 +1,90 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { FilePicker } from "../components/FilePicker";
 import { QRDisplay } from "../components/QRDisplay";
-import { DevicePairing } from "../components/DevicePairing";
+import { DevicePairing, type PairingStatus } from "../components/DevicePairing";
 import { TransferStatus } from "../components/TransferStatus";
 import { generateKey, exportKey, encrypt } from "../lib/crypto";
-import { createSession, uploadEncrypted } from "../lib/transfer";
+import { createSession, uploadEncrypted, pollUntilGone } from "../lib/transfer";
 import { getOrCreateDeviceName } from "../lib/devicename";
+import { PresenceClient } from "../lib/presence";
 
-type Mode = "pick" | "method" | "qr-sending" | "qr-done" | "pairing" | "error";
+type Mode = "pick" | "method" | "qr-sending" | "pairing" | "error";
+type UploadPhase = "encrypting" | "uploading" | "waiting" | "done";
 
 export function Send() {
   const [mode, setMode] = useState<Mode>("pick");
-  const [file, setFile] = useState<File | null>(null);
+  const [myName] = useState(() => getOrCreateDeviceName());
+
+  // File — kept in both state (for rendering) and a ref (for stable closure access).
+  const [file, _setFile] = useState<File | null>(null);
+  const fileRef = useRef<File | null>(null);
+  function setFile(f: File | null) {
+    fileRef.current = f;
+    _setFile(f);
+  }
+
+  // QR / upload flow
   const [qrUrl, setQrUrl] = useState("");
   const [shortCode, setShortCode] = useState("");
   const [progress, setProgress] = useState(0);
-  const [phase, setPhase] = useState<"encrypting" | "uploading" | "waiting">("encrypting");
+  const [uploadPhase, setUploadPhase] = useState<UploadPhase>("encrypting");
+  const pollAbortRef = useRef<AbortController | null>(null);
+
+  // Pairing flow — PresenceClient lives here so it survives mode transitions.
+  const presenceRef = useRef<PresenceClient | null>(null);
+  const pairedTargetRef = useRef<string | null>(null);
+  const [peers, setPeers] = useState<string[]>([]);
+  const [pairingStatus, setPairingStatus] = useState<PairingStatus>("connecting");
+  const [incomingFrom, setIncomingFrom] = useState<string | null>(null);
+
   const [errorMsg, setErrorMsg] = useState("");
-  const myName = getOrCreateDeviceName();
+
+  // Connect presence WebSocket once when pairing mode is entered.
+  // The client is intentionally kept alive across subsequent mode changes so
+  // that a transfer-invite sent after upload can still be delivered.
+  useEffect(() => {
+    if (mode !== "pairing" || presenceRef.current) return;
+
+    const client = new PresenceClient(myName);
+    presenceRef.current = client;
+
+    client.onPeers = (list) => {
+      setPeers(list);
+      setPairingStatus((s) => (s === "connecting" ? "ready" : s));
+    };
+    client.onPairRequest = (from) => setIncomingFrom(from);
+    client.onPairResponse = (_from, accepted) => {
+      if (!accepted) { setPairingStatus("ready"); return; }
+      // Sender side: start the upload immediately.
+      const f = fileRef.current;
+      if (f) startQR(f);
+    };
+    client.onTransferReceived = (url) => {
+      // Receiver side: navigate directly to the receive URL.
+      // The URL fragment carries the decryption key and is never sent to the server.
+      window.location.href = url;
+    };
+
+    client.connect()
+      .then(() => setPairingStatus("ready"))
+      .catch(() => setPairingStatus("error"));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
+  // Disconnect and abort polling when the component unmounts.
+  useEffect(() => {
+    return () => {
+      presenceRef.current?.disconnect();
+      pollAbortRef.current?.abort();
+    };
+  }, []);
 
   async function startQR(selectedFile: File) {
-    setFile(selectedFile);
     setMode("qr-sending");
     try {
-      setPhase("encrypting");
+      setUploadPhase("encrypting");
       setProgress(0);
+
       const key = await generateKey();
       const keyStr = await exportKey(key);
       const buf = await selectedFile.arrayBuffer();
@@ -37,12 +97,28 @@ export function Send() {
       );
       setShortCode(sessionId.slice(0, 6).toUpperCase());
 
+      // Show QR code immediately — receiver can scan while upload is in progress.
       const receiveUrl = `${location.origin}/r/${sessionId}#key=${keyStr}`;
       setQrUrl(receiveUrl);
 
-      setPhase("uploading");
-      await uploadEncrypted(sessionId, encrypted, (pct) => setProgress(pct));
-      setPhase("waiting");
+      setUploadPhase("uploading");
+      await uploadEncrypted(sessionId, encrypted, setProgress);
+      setUploadPhase("waiting");
+
+      // If we arrived here from device pairing, push the URL to the paired device.
+      if (pairedTargetRef.current && presenceRef.current) {
+        presenceRef.current.sendTransferInvite(
+          pairedTargetRef.current,
+          receiveUrl,
+          selectedFile.name
+        );
+      }
+
+      // Poll until the session disappears (receiver downloaded → server deleted it).
+      const abort = new AbortController();
+      pollAbortRef.current = abort;
+      await pollUntilGone(sessionId, 2000, abort.signal);
+      if (!abort.signal.aborted) setUploadPhase("done");
     } catch (e: unknown) {
       setErrorMsg(e instanceof Error ? e.message : "Unknown error");
       setMode("error");
@@ -53,6 +129,27 @@ export function Send() {
     setFile(f);
     setMode("method");
   }
+
+  function onRequestPair(target: string) {
+    setPairingStatus("requesting");
+    pairedTargetRef.current = target;
+    presenceRef.current?.requestPair(target);
+  }
+
+  function onAcceptPair() {
+    if (!incomingFrom) return;
+    presenceRef.current?.respondPair(incomingFrom, true);
+    setIncomingFrom(null);
+    setPairingStatus("waiting-for-file");
+  }
+
+  function onRejectPair() {
+    if (!incomingFrom) return;
+    presenceRef.current?.respondPair(incomingFrom, false);
+    setIncomingFrom(null);
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   if (mode === "pick") {
     return (
@@ -67,7 +164,9 @@ export function Send() {
     return (
       <div className="page">
         <h2>How do you want to share?</h2>
-        <p className="file-preview">📄 {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)</p>
+        <p className="file-preview">
+          📄 {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
+        </p>
         <div className="method-choices">
           <button className="method-card" onClick={() => startQR(file)}>
             <span className="method-icon">📷</span>
@@ -77,10 +176,12 @@ export function Send() {
           <button className="method-card" onClick={() => setMode("pairing")}>
             <span className="method-icon">📡</span>
             <span className="method-title">Nearby Devices</span>
-            <span className="method-desc">Same Wi-Fi — direct pairing</span>
+            <span className="method-desc">Same Wi-Fi — automatic delivery</span>
           </button>
         </div>
-        <button className="btn-secondary back-btn" onClick={() => setMode("pick")}>← Back</button>
+        <button className="btn-secondary back-btn" onClick={() => setMode("pick")}>
+          ← Back
+        </button>
       </div>
     );
   }
@@ -89,9 +190,25 @@ export function Send() {
     return (
       <div className="page">
         <h2>Sending: {file?.name}</h2>
-        <TransferStatus phase={phase} progress={phase === "uploading" ? progress : undefined} />
-        {qrUrl && phase === "waiting" && (
-          <QRDisplay url={qrUrl} shortCode={shortCode} />
+        {/* QR is shown as soon as the session URL is ready, even during upload */}
+        {qrUrl && <QRDisplay url={qrUrl} shortCode={shortCode} />}
+        {uploadPhase !== "done" ? (
+          <TransferStatus
+            phase={uploadPhase}
+            progress={uploadPhase === "uploading" ? progress : undefined}
+          />
+        ) : (
+          <div className="transfer-status done">
+            <p className="phase-label">File delivered ✓</p>
+            <button className="btn-primary" style={{ marginTop: 12 }} onClick={() => {
+              setMode("pick");
+              setFile(null);
+              setQrUrl("");
+              setUploadPhase("encrypting");
+            }}>
+              Send another
+            </button>
+          </div>
         )}
       </div>
     );
@@ -100,14 +217,35 @@ export function Send() {
   if (mode === "pairing") {
     return (
       <div className="page">
-        <h2>Pair with a nearby device</h2>
+        <h2>Nearby Devices</h2>
         <DevicePairing
           myName={myName}
-          onPaired={() => {
-            if (file) startQR(file);
-          }}
+          peers={peers}
+          status={pairingStatus}
+          incomingFrom={incomingFrom}
+          onRequestPair={onRequestPair}
+          onAcceptPair={onAcceptPair}
+          onRejectPair={onRejectPair}
         />
-        <button className="btn-secondary back-btn" onClick={() => setMode("method")}>← Back</button>
+        {file && (
+          <p className="file-preview" style={{ marginTop: 8 }}>
+            📄 {file.name} ({(file.size / 1024 / 1024).toFixed(1)} MB)
+          </p>
+        )}
+        <button
+          className="btn-secondary back-btn"
+          onClick={() => {
+            presenceRef.current?.disconnect();
+            presenceRef.current = null;
+            setMode(file ? "method" : "pick");
+            setPeers([]);
+            setPairingStatus("connecting");
+            setIncomingFrom(null);
+            pairedTargetRef.current = null;
+          }}
+        >
+          ← Back
+        </button>
       </div>
     );
   }
@@ -116,7 +254,9 @@ export function Send() {
     return (
       <div className="page">
         <TransferStatus phase="error" error={errorMsg} />
-        <button className="btn-primary" onClick={() => setMode("pick")}>Try again</button>
+        <button className="btn-primary" onClick={() => { setMode("pick"); setFile(null); }}>
+          Try again
+        </button>
       </div>
     );
   }

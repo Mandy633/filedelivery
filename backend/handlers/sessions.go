@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/mandy633/filedelivery/backend/session"
 )
+
+const maxUploadSize = 100 * 1024 * 1024 // 100 MB
 
 type SessionHandler struct {
 	Store *session.Store
@@ -37,14 +40,17 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "fileName and mimeType required", http.StatusBadRequest)
 		return
 	}
-	const maxSize = 100 * 1024 * 1024 // 100 MB
-	if req.FileSize > maxSize {
+	if req.FileSize > maxUploadSize {
 		http.Error(w, "file too large (max 100 MB)", http.StatusRequestEntityTooLarge)
 		return
 	}
-	sess := h.Store.Create(req.FileName, req.MIMEType, req.FileSize)
+	id, err := h.Store.Create(req.FileName, req.MIMEType, req.FileSize)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(createResponse{SessionID: sess.ID})
+	json.NewEncoder(w).Encode(createResponse{SessionID: id})
 }
 
 func (h *SessionHandler) Upload(w http.ResponseWriter, r *http.Request) {
@@ -53,14 +59,11 @@ func (h *SessionHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := sessionIDFromPath(r.URL.Path)
-	sess, ok := h.Store.Get(id)
-	if !ok {
+	if !h.Store.Exists(id) {
 		http.NotFound(w, r)
 		return
 	}
-	_ = sess
-	const maxSize = 100 * 1024 * 1024
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
@@ -79,7 +82,7 @@ func (h *SessionHandler) Meta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := sessionIDFromPath(r.URL.Path)
-	sess, ok := h.Store.Get(id)
+	snap, ok := h.Store.GetMeta(id)
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -92,10 +95,10 @@ func (h *SessionHandler) Meta(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(metaResponse{
-		FileName: sess.FileName,
-		MIMEType: sess.MIMEType,
-		FileSize: sess.FileSize,
-		Ready:    len(sess.Data) > 0,
+		FileName: snap.FileName,
+		MIMEType: snap.MIMEType,
+		FileSize: snap.FileSize,
+		Ready:    snap.Ready,
 	})
 }
 
@@ -105,20 +108,20 @@ func (h *SessionHandler) Download(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := sessionIDFromPath(r.URL.Path)
-	sess, ok := h.Store.Get(id)
+	data, ok := h.Store.TakeData(id)
 	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	if len(sess.Data) == 0 {
-		http.Error(w, "not ready", http.StatusAccepted)
+		if h.Store.Exists(id) {
+			// Session exists but upload is not done yet.
+			http.Error(w, "not ready", http.StatusAccepted)
+		} else {
+			http.NotFound(w, r)
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment")
-	w.Write(sess.Data)
-	h.Store.MarkDownloaded(id)
-	go h.Store.Delete(id)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Write(data)
 }
 
 func (h *SessionHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -126,18 +129,15 @@ func (h *SessionHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	id := sessionIDFromPath(r.URL.Path)
-	h.Store.Delete(id)
+	h.Store.Delete(sessionIDFromPath(r.URL.Path))
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// sessionIDFromPath extracts the last path segment.
+// sessionIDFromPath extracts the session ID from /api/sessions/{id}[/...].
 func sessionIDFromPath(path string) string {
-	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] != "" && parts[i] != "file" && parts[i] != "meta" {
-			return parts[i]
-		}
+	rest := strings.TrimPrefix(path, "/api/sessions/")
+	if rest == path {
+		return ""
 	}
-	return ""
+	return strings.SplitN(rest, "/", 2)[0]
 }
