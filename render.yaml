@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: filedelivery
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: CORS_ORIGIN
+        value: "*"
